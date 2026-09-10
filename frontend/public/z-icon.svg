@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <!-- Темный фон со скругленными углами -->
+  <rect width="100" height="100" rx="24" fill="#020617"/>
+  
+  <!-- Неоновое свечение (фильтр) -->
+  <defs>
+    <filter id="neonGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="4" result="blur1" />
+      <feGaussianBlur stdDeviation="8" result="blur2" />
+      <feMerge>
+        <feMergeNode in="blur2" />
+        <feMergeNode in="blur1" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Буква Z цвета индиго (#6366f1) с эффектом свечения -->
+  <text 
+    x="50%" 
+    y="54%" 
+    font-family="system-ui, sans-serif" 
+    font-size="64" 
+    font-weight="800" 
+    fill="#6366f1" 
+    text-anchor="middle" 
+    dominant-baseline="middle"
+    filter="url(#neonGlow)"
+  >
+    Z
+  </text>
+</svg>
