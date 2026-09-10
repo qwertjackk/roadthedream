@@ -1,9 +1,10 @@
 import { useState, useEffect, useMemo } from 'react';
 import axios from 'axios';
+import * as XLSX from 'xlsx';
 import { 
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend 
 } from 'recharts';
-import { Calculator, DollarSign, Zap, Trash2, RotateCcw, CheckCircle2, FileText, Plus, User, LogOut, X } from 'lucide-react';
+import { Calculator, DollarSign, Zap, Trash2, RotateCcw, CheckCircle2, FileText, Plus, User, LogOut, X, Download } from 'lucide-react';
 
 const API_URL = 'http://localhost:8000';
 
@@ -87,7 +88,6 @@ export default function App() {
   });
 
   const currentFormLoanAmount = formData.property_price - formData.down_payment;
-  // Для правого блока берем сохраненный долг, чтобы цифры не менялись во время того, как вы тянете ползунок
   const activeLoanAmount = scheduleData ? Number(scheduleData.loan_info.initial_amount) : currentFormLoanAmount;
 
   useEffect(() => {
@@ -358,8 +358,31 @@ export default function App() {
     setFormData({...formData, term_years: val});
   };
 
+  const exportToExcel = () => {
+    if (!scheduleData) return;
 
-  // ================= ОПТИМИЗАЦИЯ РЕНДЕРА (useMemo) =================
+    const wsData = scheduleData.schedule.map((row: any) => ({
+      '№ Месяца': row.payment_number,
+      'Дата': new Date(row.date).toLocaleDateString('ru-RU'),
+      'Общий платеж (₽)': row.total_payment,
+      'Тело долга (₽)': row.principal_payment,
+      'Проценты (₽)': row.interest_payment,
+      'Досрочно (₽)': row.extra_payment,
+      'Остаток долга (₽)': row.remaining_balance
+    }));
+
+    const ws = XLSX.utils.json_to_sheet(wsData);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "График платежей");
+
+    const colWidths = [
+      { wch: 10 }, { wch: 15 }, { wch: 18 }, { wch: 18 }, { wch: 18 }, { wch: 18 }, { wch: 20 }
+    ];
+    ws['!cols'] = colWidths;
+
+    XLSX.writeFile(wb, `${formData.name}_График.xlsx`);
+  };
+
   const chartComponent = useMemo(() => {
     if (!scheduleData) return null;
     return (
@@ -384,46 +407,59 @@ export default function App() {
   const tableComponent = useMemo(() => {
     if (!scheduleData) return null;
     return (
-      <div className="overflow-x-auto h-[500px]">
-        <table className="w-full text-left text-sm whitespace-nowrap">
-          <thead className="bg-slate-950 text-slate-400 sticky top-0 shadow-sm z-10">
-            <tr>
-              <th className="p-4 font-medium border-b border-slate-800 text-center w-16">✅</th>
-              <th className="p-4 font-medium border-b border-slate-800">№ / Дата</th>
-              <th className="p-4 font-medium border-b border-slate-800">Платеж</th>
-              <th className="p-4 font-medium border-b border-slate-800">Тело долга</th>
-              <th className="p-4 font-medium border-b border-slate-800">Проценты</th>
-              <th className="p-4 font-medium text-indigo-400 border-b border-slate-800">Досрочно</th>
-              <th className="p-4 font-medium border-b border-slate-800">Остаток</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-800/50">
-            {scheduleData.schedule.filter((row: any) => row.total_payment > 0).map((row: any) => {
-              const isPaid = scheduleData.paid_payment_numbers.includes(row.payment_number);
-              return (
-                <tr key={row.payment_number} className={`hover:bg-slate-800/50 transition-colors ${isPaid ? 'bg-emerald-950/20 opacity-75' : row.extra_payment > 0 ? 'bg-indigo-900/10' : ''}`}>
-                  <td className="p-4 text-center">
-                    <button onClick={() => handleTogglePaidMonth(currentLoanId!, row.payment_number, isPaid)} className={`p-1 rounded-lg transition-colors ${isPaid ? 'text-emerald-400 bg-emerald-900/40' : 'text-slate-600 hover:text-slate-400'}`}><CheckCircle2 size={20} /></button>
-                  </td>
-                  <td className="p-4 text-slate-400">
-                    <div className="flex items-center space-x-2"><span>{row.payment_number} мес.</span>{isPaid && <span className="text-[10px] bg-emerald-950 text-emerald-400 px-1.5 py-0.5 rounded border border-emerald-800/50">Оплачено</span>}</div>
-                    <span className="text-xs text-slate-500">{new Date(row.date).toLocaleDateString('ru-RU')}</span>
-                  </td>
-                  <td className="p-4 font-medium text-white">{formatMoney(row.total_payment - row.extra_payment)}</td>
-                  <td className="p-4 text-emerald-400">{formatMoney(row.principal_payment)}</td>
-                  <td className="p-4 text-red-400">{formatMoney(row.interest_payment)}</td>
-                  <td className="p-4 text-indigo-400 font-medium">{row.extra_payment > 0 ? `+ ${formatMoney(row.extra_payment)}` : '-'}</td>
-                  <td className="p-4 text-slate-300 font-medium">{formatMoney(row.remaining_balance)}</td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+      <div className="bg-slate-900 rounded-2xl shadow-lg border border-slate-800 overflow-hidden">
+        <div className="flex flex-col sm:flex-row justify-between items-center p-4 border-b border-slate-800 bg-slate-950/50 gap-4">
+          <h3 className="text-lg font-semibold text-white">Детальный график</h3>
+          <div className="flex space-x-3 w-full sm:w-auto">
+            <button 
+              onClick={exportToExcel} 
+              className="flex-1 sm:flex-none flex items-center justify-center space-x-2 text-sm text-emerald-400 hover:text-emerald-300 transition-colors bg-emerald-950/40 hover:bg-emerald-900/60 px-4 py-2 rounded-lg border border-emerald-900/50 shadow-sm"
+            >
+              <Download size={16} />
+              <span>В Excel</span>
+            </button>
+          </div>
+        </div>
+        
+        <div className="overflow-x-auto h-[500px]">
+          <table className="w-full text-left text-sm whitespace-nowrap">
+            <thead className="bg-slate-950 text-slate-400 sticky top-0 shadow-sm z-10">
+              <tr>
+                <th className="p-4 font-medium border-b border-slate-800 text-center w-16">✅</th>
+                <th className="p-4 font-medium border-b border-slate-800">№ / Дата</th>
+                <th className="p-4 font-medium border-b border-slate-800">Платеж</th>
+                <th className="p-4 font-medium border-b border-slate-800">Тело долга</th>
+                <th className="p-4 font-medium border-b border-slate-800">Проценты</th>
+                <th className="p-4 font-medium text-indigo-400 border-b border-slate-800">Досрочно</th>
+                <th className="p-4 font-medium border-b border-slate-800">Остаток</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-800/50">
+              {scheduleData.schedule.filter((row: any) => row.total_payment > 0).map((row: any) => {
+                const isPaid = scheduleData.paid_payment_numbers.includes(row.payment_number);
+                return (
+                  <tr key={row.payment_number} className={`hover:bg-slate-800/50 transition-colors ${isPaid ? 'bg-emerald-950/20 opacity-75' : row.extra_payment > 0 ? 'bg-indigo-900/10' : ''}`}>
+                    <td className="p-4 text-center">
+                      <button onClick={() => handleTogglePaidMonth(currentLoanId!, row.payment_number, isPaid)} className={`p-1 rounded-lg transition-colors ${isPaid ? 'text-emerald-400 bg-emerald-900/40' : 'text-slate-600 hover:text-slate-400'}`}><CheckCircle2 size={20} /></button>
+                    </td>
+                    <td className="p-4 text-slate-400">
+                      <div className="flex items-center space-x-2"><span>{row.payment_number} мес.</span>{isPaid && <span className="text-[10px] bg-emerald-950 text-emerald-400 px-1.5 py-0.5 rounded border border-emerald-800/50">Оплачено</span>}</div>
+                      <span className="text-xs text-slate-500">{new Date(row.date).toLocaleDateString('ru-RU')}</span>
+                    </td>
+                    <td className="p-4 font-medium text-white">{formatMoney(row.total_payment - row.extra_payment)}</td>
+                    <td className="p-4 text-emerald-400">{formatMoney(row.principal_payment)}</td>
+                    <td className="p-4 text-red-400">{formatMoney(row.interest_payment)}</td>
+                    <td className="p-4 text-indigo-400 font-medium">{row.extra_payment > 0 ? `+ ${formatMoney(row.extra_payment)}` : '-'}</td>
+                    <td className="p-4 text-slate-300 font-medium">{formatMoney(row.remaining_balance)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       </div>
     );
-  }, [scheduleData, currentLoanId]); 
-  // ==================================================================
-
+  }, [scheduleData, currentLoanId, formData.name]);
 
   return (
     <div className="min-h-screen bg-slate-950 p-4 md:p-8 font-sans text-slate-200">
@@ -480,7 +516,7 @@ export default function App() {
             <div className="bg-indigo-600 p-2 rounded-lg text-white shadow-lg shadow-indigo-900/20">
               <Calculator size={28} />
             </div>
-            <h1 className="text-3xl font-bold text-white tracking-tight">RoadTheDream</h1>
+            <h1 className="text-3xl font-bold text-white tracking-tight">zproject</h1>
           </div>
           <div className="flex items-center space-x-4">
             {scheduleData && scheduleData.saved_interest > 0 && (
@@ -502,7 +538,7 @@ export default function App() {
               ) : (
                 <button onClick={() => setIsAuthModalOpen(true)} className="flex items-center space-x-2 px-3 py-1.5 text-indigo-400 hover:text-indigo-300 transition-colors text-sm font-medium">
                   <User size={16} />
-                  <span className="hidden sm:inline">Войти в профиль</span>
+                  <span className="hidden sm:inline">Войти</span>
                 </button>
               )}
             </div>
@@ -521,7 +557,7 @@ export default function App() {
           ))}
           <button onClick={handleNewLoanClick} className={`flex items-center space-x-1 px-4 py-2 rounded-lg whitespace-nowrap text-sm font-medium transition-all duration-200 border border-dashed ${!currentLoanId && loansList.length > 0 ? 'border-indigo-500 text-indigo-400 bg-indigo-950/30' : 'border-slate-700 text-slate-400 hover:bg-slate-900 hover:text-slate-300'}`}>
             <Plus size={16} />
-            <span>Добавить кредит</span>
+            <span>Добавить</span>
           </button>
         </div>
 
@@ -554,7 +590,6 @@ export default function App() {
                 </div>
               </div>
 
-              {/* КАРТОЧКА: СТОИМОСТЬ НЕДВИЖИМОСТИ */}
               <div className="relative bg-slate-950 border border-slate-800 rounded-lg p-3 pt-2 focus-within:border-indigo-500 transition-colors pb-4">
                 <label className="block text-xs font-medium text-slate-500 mb-1">Стоимость недвижимости (₽)</label>
                 <div className="flex justify-between items-center">
@@ -573,7 +608,6 @@ export default function App() {
                 />
               </div>
 
-              {/* КАРТОЧКА: ПЕРВОНАЧАЛЬНЫЙ ВЗНОС */}
               <div className="relative bg-slate-950 border border-slate-800 rounded-lg p-3 pt-2 focus-within:border-indigo-500 transition-colors pb-4">
                 <label className="block text-xs font-medium text-slate-500 mb-1">Первоначальный взнос (₽)</label>
                 <div className="flex justify-between items-center">
@@ -600,7 +634,6 @@ export default function App() {
                 <span className="font-bold text-white text-base">{formatMoney(currentFormLoanAmount)}</span>
               </div>
 
-              {/* КАРТОЧКИ: СТАВКА И СРОК В ОДИН РЯД */}
               <div className="grid grid-cols-2 gap-4">
                 
                 <div className="relative bg-slate-950 border border-slate-800 rounded-lg p-3 pt-2 focus-within:border-indigo-500 transition-colors pb-4">
@@ -751,9 +784,8 @@ export default function App() {
                   {chartComponent}
                 </div>
 
-                <div className="bg-slate-900 rounded-2xl shadow-lg border border-slate-800 overflow-hidden">
-                  {tableComponent}
-                </div>
+                {tableComponent}
+                
               </>
             ) : (
               <div className="h-full flex items-center justify-center border-2 border-dashed border-slate-800 rounded-2xl text-slate-500 p-10 text-center">
