@@ -1,7 +1,7 @@
-import uuid
 from sqlalchemy import Column, String, Numeric, Integer, Date, Boolean, ForeignKey, Enum as SQLEnum
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
+import uuid
 import enum
 from database import Base
 
@@ -13,21 +13,22 @@ class StrategyType(enum.Enum):
     REDUCE_TERM = "REDUCE_TERM"
     REDUCE_PAYMENT = "REDUCE_PAYMENT"
 
+# --- НОВАЯ ТАБЛИЦА ПОЛЬЗОВАТЕЛЕЙ ---
 class User(Base):
     __tablename__ = "users"
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    email = Column(String, unique=True, index=True)
-    hashed_password = Column(String)
+    username = Column(String, unique=True, index=True)
+    hashed_password = Column(String) # Хэшированный пароль
     
-    loans = relationship("Loan", back_populates="owner")
+    loans = relationship("Loan", back_populates="owner", cascade="all, delete-orphan")
 
 class Loan(Base):
     __tablename__ = "loans"
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    # Поле user_id может быть пустым (nullable=True), чтобы гости тоже могли пользоваться сервисом
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True) 
     name = Column(String)
     
-    # NUMERIC(15,2) для точных денежных расчетов
     initial_amount = Column(Numeric(15, 2))
     interest_rate = Column(Numeric(5, 2))
     term_months = Column(Integer)
@@ -37,8 +38,7 @@ class Loan(Base):
     payment_type = Column(SQLEnum(PaymentType))
     
     owner = relationship("User", back_populates="loans")
-    extra_payments = relationship("ExtraPayment", back_populates="loan")
-
+    extra_payments = relationship("ExtraPayment", back_populates="loan", cascade="all, delete-orphan")
     paid_months = relationship("PaidMonth", back_populates="loan", cascade="all, delete-orphan")
 
 class ExtraPayment(Base):

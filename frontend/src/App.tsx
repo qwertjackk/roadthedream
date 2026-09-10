@@ -3,7 +3,7 @@ import axios from 'axios';
 import { 
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend 
 } from 'recharts';
-import { Calculator, Calendar, DollarSign, Percent, Zap, Home, Wallet, Trash2, RotateCcw, CheckCircle2, FileText, Plus } from 'lucide-react';
+import { Calculator, Calendar, DollarSign, Percent, Zap, Home, Wallet, Trash2, RotateCcw, CheckCircle2, FileText, Plus, User, LogOut, X } from 'lucide-react';
 
 const API_URL = 'http://localhost:8000';
 
@@ -21,7 +21,6 @@ const formatMoney = (amount: number) => {
   return new Intl.NumberFormat('ru-RU', { style: 'currency', currency: 'RUB', maximumFractionDigits: 0 }).format(amount);
 };
 
-// Функции для сохранения стоимости и взноса в память браузера
 const saveLoanInputs = (id: string, price: number, down: number) => {
   localStorage.setItem(`loanInputs_${id}`, JSON.stringify({ price, down }));
 };
@@ -41,6 +40,32 @@ export default function App() {
     first_payment_date: new Date(new Date().setMonth(new Date().getMonth() + 1)).toISOString().split('T')[0],
     payment_type: 'ANNUITY'
   };
+
+  // ================= АВТОРИЗАЦИЯ =================
+  const [authToken, setAuthToken] = useState<string | null>(localStorage.getItem('authToken'));
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [isLoginMode, setIsLoginMode] = useState(true);
+  const [authForm, setAuthForm] = useState({ username: '', password: '' });
+  const [authError, setAuthError] = useState('');
+  const [authLoading, setAuthLoading] = useState(false);
+
+  // Для гостей храним массив ID их кредитов в localStorage
+  const [guestLoanIds, setGuestLoanIds] = useState<string[]>(() => {
+    const saved = localStorage.getItem('guestLoanIds');
+    return saved ? JSON.parse(saved) : [];
+  });
+
+  // Устанавливаем токен для всех запросов axios
+  useEffect(() => {
+    if (authToken) {
+      axios.defaults.headers.common['Authorization'] = `Bearer ${authToken}`;
+      localStorage.setItem('authToken', authToken);
+    } else {
+      delete axios.defaults.headers.common['Authorization'];
+      localStorage.removeItem('authToken');
+    }
+  }, [authToken]);
+  // ===============================================
 
   const [formData, setFormData] = useState(() => {
     const saved = localStorage.getItem('mortgageFormData');
@@ -79,13 +104,71 @@ export default function App() {
     }
   }, [currentLoanId]);
 
+  // Загружаем список кредитов при старте или смене токена
   useEffect(() => {
     fetchAllLoans();
-  }, []);
+  }, [authToken]); 
+
+  // ================= ФУНКЦИИ АВТОРИЗАЦИИ =================
+  const handleAuthSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError('');
+    setAuthLoading(true);
+
+    try {
+      if (isLoginMode) {
+        // FastAPI OAuth2PasswordRequestForm требует данные в формате x-www-form-urlencoded
+        const params = new URLSearchParams();
+        params.append('username', authForm.username);
+        params.append('password', authForm.password);
+        
+        const res = await axios.post(`${API_URL}/login`, params);
+        setAuthToken(res.data.access_token);
+        setIsAuthModalOpen(false);
+      } else {
+        // Регистрация
+        await axios.post(`${API_URL}/register`, authForm);
+        // Сразу логиним
+        const params = new URLSearchParams();
+        params.append('username', authForm.username);
+        params.append('password', authForm.password);
+        const res = await axios.post(`${API_URL}/login`, params);
+        setAuthToken(res.data.access_token);
+        setIsAuthModalOpen(false);
+      }
+    } catch (error: any) {
+      setAuthError(error.response?.data?.detail || 'Ошибка авторизации');
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleLogout = () => {
+    setAuthToken(null);
+    setCurrentLoanId(null);
+    setScheduleData(null);
+    setLoansList([]);
+    setFormData(defaultForm);
+  };
+  // ========================================================
 
   const fetchAllLoans = async (selectId?: string, forceFallback?: boolean) => {
     try {
-      const res = await axios.get(`${API_URL}/loans`);
+      let url = `${API_URL}/loans`;
+      
+      // Если мы гость, нужно передать наши ID из кэша
+      if (!authToken) {
+        if (guestLoanIds.length > 0) {
+          url += `?ids=${guestLoanIds.join(',')}`;
+        } else {
+          // У гостя нет кредитов
+          setLoansList([]);
+          handleNewLoanClick();
+          return;
+        }
+      }
+
+      const res = await axios.get(url);
       setLoansList(res.data);
       
       if (forceFallback) {
@@ -121,12 +204,10 @@ export default function App() {
 
       const loanInfo = scheduleRes.data.loan_info;
       
-      // ИЩЕМ НАШИ СОХРАНЕННЫЕ ДАННЫЕ О СТОИМОСТИ И ВЗНОСЕ
       const savedInputs = getLoanInputs(loanId);
       let priceToSet = Number(loanInfo.initial_amount);
       let downToSet = 0;
 
-      // Если мы нашли сохраненные данные и они математически сходятся с долгом из БД — восстанавливаем их!
       if (savedInputs && (savedInputs.price - savedInputs.down === Number(loanInfo.initial_amount))) {
         priceToSet = savedInputs.price;
         downToSet = savedInputs.down;
@@ -180,12 +261,20 @@ export default function App() {
 
       if (currentLoanId) {
         await axios.put(`${API_URL}/loans/${currentLoanId}`, payload);
-        saveLoanInputs(currentLoanId, formData.property_price, formData.down_payment); // Сохраняем новые цифры!
+        saveLoanInputs(currentLoanId, formData.property_price, formData.down_payment);
         await fetchAllLoans(currentLoanId);
       } else {
         const loanRes = await axios.post(`${API_URL}/loans`, payload);
         const newLoanId = loanRes.data.id;
-        saveLoanInputs(newLoanId, formData.property_price, formData.down_payment); // Сохраняем новые цифры!
+        
+        // Если мы гость, запоминаем ID созданного кредита в кэш
+        if (!authToken) {
+          const updatedGuestIds = [...guestLoanIds, newLoanId];
+          setGuestLoanIds(updatedGuestIds);
+          localStorage.setItem('guestLoanIds', JSON.stringify(updatedGuestIds));
+        }
+
+        saveLoanInputs(newLoanId, formData.property_price, formData.down_payment);
         await fetchAllLoans(newLoanId);
       }
     } catch (error) {
@@ -204,7 +293,15 @@ export default function App() {
 
     try {
       await axios.delete(`${API_URL}/loans/${currentLoanId}`);
-      localStorage.removeItem(`loanInputs_${currentLoanId}`); // Чистим кэш при удалении
+      localStorage.removeItem(`loanInputs_${currentLoanId}`);
+      
+      // Если гость - удаляем ID из кэша
+      if (!authToken) {
+        const updatedGuestIds = guestLoanIds.filter(id => id !== currentLoanId);
+        setGuestLoanIds(updatedGuestIds);
+        localStorage.setItem('guestLoanIds', JSON.stringify(updatedGuestIds));
+      }
+
       await fetchAllLoans(undefined, true);
     } catch (error) {
       console.error("Ошибка при удалении", error);
@@ -252,6 +349,70 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-950 p-4 md:p-8 font-sans text-slate-200">
+      
+      {/* МОДАЛЬНОЕ ОКНО АВТОРИЗАЦИИ */}
+      {isAuthModalOpen && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 w-full max-w-md shadow-2xl relative">
+            <button 
+              onClick={() => setIsAuthModalOpen(false)}
+              className="absolute top-4 right-4 text-slate-400 hover:text-white transition-colors"
+            >
+              <X size={20} />
+            </button>
+            <h3 className="text-2xl font-bold text-white mb-2">
+              {isLoginMode ? 'С возвращением' : 'Регистрация'}
+            </h3>
+            <p className="text-slate-400 text-sm mb-6">
+              {isLoginMode ? 'Войдите, чтобы получить доступ к своим кредитам' : 'Создайте аккаунт для облачного сохранения'}
+            </p>
+
+            <form onSubmit={handleAuthSubmit} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-slate-400 mb-1">Имя пользователя (Логин)</label>
+                <input 
+                  type="text" 
+                  value={authForm.username}
+                  onChange={(e) => setAuthForm({...authForm, username: e.target.value})}
+                  className="w-full px-4 py-2 bg-slate-950 border border-slate-800 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-white"
+                  required
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-400 mb-1">Пароль</label>
+                <input 
+                  type="password" 
+                  value={authForm.password}
+                  onChange={(e) => setAuthForm({...authForm, password: e.target.value})}
+                  className="w-full px-4 py-2 bg-slate-950 border border-slate-800 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-white"
+                  required
+                />
+              </div>
+
+              {authError && <div className="text-red-400 text-sm">{authError}</div>}
+
+              <button 
+                type="submit" 
+                disabled={authLoading}
+                className="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 rounded-lg transition-colors mt-2 shadow-lg disabled:bg-blue-800"
+              >
+                {authLoading ? 'Обработка...' : (isLoginMode ? 'Войти' : 'Зарегистрироваться')}
+              </button>
+            </form>
+
+            <div className="mt-6 text-center text-sm text-slate-400">
+              {isLoginMode ? "Нет аккаунта? " : "Уже есть аккаунт? "}
+              <button 
+                onClick={() => {setIsLoginMode(!isLoginMode); setAuthError('');}}
+                className="text-blue-400 hover:text-blue-300 font-medium"
+              >
+                {isLoginMode ? 'Создать' : 'Войти'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="max-w-7xl mx-auto space-y-6">
         
         <header className="flex items-center justify-between mb-2">
@@ -262,16 +423,39 @@ export default function App() {
             <h1 className="text-3xl font-bold text-white tracking-tight">RoadTheDream</h1>
           </div>
 
-          {scheduleData && scheduleData.saved_interest > 0 && (
-            <div className="hidden md:flex items-center space-x-4 bg-emerald-950/40 border border-emerald-900/50 px-4 py-2 rounded-xl">
-              <div className="text-emerald-400 font-bold flex items-center space-x-1">
-                <span>🎉 Сэкономлено: {formatMoney(scheduleData.saved_interest)}</span>
+          <div className="flex items-center space-x-4">
+            {scheduleData && scheduleData.saved_interest > 0 && (
+              <div className="hidden lg:flex items-center space-x-4 bg-emerald-950/40 border border-emerald-900/50 px-4 py-2 rounded-xl">
+                <div className="text-emerald-400 font-bold flex items-center space-x-1">
+                  <span>🎉 Сэкономлено: {formatMoney(scheduleData.saved_interest)}</span>
+                </div>
+                <div className="text-xs text-emerald-300/80 bg-emerald-900/40 px-2 py-1 rounded">
+                  Срок сокращен на {scheduleData.saved_months} мес.
+                </div>
               </div>
-              <div className="text-xs text-emerald-300/80 bg-emerald-900/40 px-2 py-1 rounded">
-                Срок сокращен на {scheduleData.saved_months} мес.
-              </div>
+            )}
+
+            {/* ПАНЕЛЬ ПРОФИЛЯ / ВХОДА */}
+            <div className="flex items-center bg-slate-900 border border-slate-800 rounded-lg p-1">
+              {authToken ? (
+                <button 
+                  onClick={handleLogout}
+                  className="flex items-center space-x-2 px-3 py-1.5 text-slate-400 hover:text-white transition-colors text-sm font-medium"
+                >
+                  <LogOut size={16} />
+                  <span className="hidden sm:inline">Выйти</span>
+                </button>
+              ) : (
+                <button 
+                  onClick={() => setIsAuthModalOpen(true)}
+                  className="flex items-center space-x-2 px-3 py-1.5 text-blue-400 hover:text-blue-300 transition-colors text-sm font-medium"
+                >
+                  <User size={16} />
+                  <span className="hidden sm:inline">Войти в профиль</span>
+                </button>
+              )}
             </div>
-          )}
+          </div>
         </header>
 
         <div className="flex space-x-2 overflow-x-auto pb-2 custom-scrollbar">
