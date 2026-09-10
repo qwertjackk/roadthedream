@@ -4,7 +4,7 @@ import * as XLSX from 'xlsx';
 import { 
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend 
 } from 'recharts';
-import { Calculator, Zap, Trash2, RotateCcw, CheckCircle2, FileText, Plus, User, LogOut, X, Download, Shield, ChevronDown, Pencil, Sparkles, CalendarDays } from 'lucide-react';
+import { Calculator, Zap, Trash2, RotateCcw, CheckCircle2, FileText, Plus, User, LogOut, X, Download, Shield, ChevronDown, Pencil, Sparkles } from 'lucide-react';
 
 const API_URL = 'http://localhost:8000';
 
@@ -123,7 +123,7 @@ export default function App() {
   };
 
   const isMonthPaid = (dateString: string) => {
-    if (isCalcMode) return false; // В калькуляторе нет истории оплат
+    if (isCalcMode) return false; 
     if (!scheduleData || !scheduleData.paid_payment_numbers) return false;
     const targetDate = new Date(dateString);
     return scheduleData.schedule.some((row: any) => {
@@ -147,13 +147,6 @@ export default function App() {
     const d = new Date(dateStr);
     return insuranceMap[`${d.getFullYear()}-${d.getMonth()}`] || 0;
   };
-
-  const nextPayment = useMemo(() => {
-    if (isCalcMode || !scheduleData) return null;
-    return scheduleData.schedule.find(
-      (row: any) => !scheduleData.paid_payment_numbers.includes(row.payment_number) && row.total_payment > 0
-    );
-  }, [scheduleData, isCalcMode]);
 
   let totalInsurance = 0;
   if (scheduleData) {
@@ -335,11 +328,6 @@ export default function App() {
     setIsEpModalOpen(true);
   };
 
-  const openEpModalForNextPayment = () => {
-    if (!nextPayment) return;
-    handleRowClick(nextPayment);
-  };
-
   const openInsModal = (group: any = null) => {
     if (group) {
       const d = new Date(group.payment_date);
@@ -390,7 +378,8 @@ export default function App() {
     const toDelete = groupItems.filter(i => !isMonthPaid(i.payment_date));
     
     if (toDelete.length === 0) {
-      alert("Нельзя удалить страховки, которые уже оплачены."); return;
+      alert("Нельзя удалить страховки, которые уже оплачены.");
+      return;
     }
     if (toDelete.length < groupItems.length) {
       if (!window.confirm("Часть страховок из этого каскада уже оплачена. Удалить только будущие (неоплаченные)?")) return;
@@ -450,12 +439,16 @@ export default function App() {
       const loanInfo = scheduleRes.data.loan_info;
       const savedInputs = getLoanInputs(loanId);
       
-      let priceToSet = Number(loanInfo.initial_amount), downToSet = 0, insToSet = [];
+      let priceToSet = Number(loanInfo.initial_amount);
+      let downToSet = 0;
+      let insToSet = [];
+
       if (savedInputs) {
         if (savedInputs.price) priceToSet = savedInputs.price;
         if (savedInputs.down) downToSet = savedInputs.down;
         if (savedInputs.insurances) insToSet = savedInputs.insurances;
       }
+
       setActiveInsurances(insToSet);
       setFormData({
         name: loanInfo.name.replace(/^\[[CT]\]\s*/, '').trim() || 'Новая ипотека', 
@@ -911,7 +904,7 @@ export default function App() {
                 </div>
               </div>
               <button type="submit" className="w-full bg-amber-600 hover:bg-amber-500 text-white font-medium py-3 rounded-xl transition-all mt-4 shadow-lg shadow-amber-900/20">
-                Сохранить
+                Сохранить настройки
               </button>
             </form>
           </div>
@@ -948,7 +941,6 @@ export default function App() {
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          
           <div className="bg-slate-900 p-6 rounded-2xl shadow-xl border border-slate-800 h-fit sticky top-6">
             <div className="flex justify-between items-center mb-6">
               <h2 className="text-xl font-semibold text-white">Параметры ипотеки</h2>
@@ -1044,42 +1036,6 @@ export default function App() {
                   <div className="text-2xl font-bold text-emerald-400 flex items-baseline gap-2">
                     {formatMoney(scheduleData.saved_interest)}
                     <span className="text-sm font-medium text-emerald-500/70">и {scheduleData.saved_months} мес.</span>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* КАРТОЧКА СЛЕДУЮЩЕГО ПЛАТЕЖА (Только в Трекере) */}
-            {!isCalcMode && nextPayment && (
-              <div className="bg-gradient-to-br from-indigo-900/40 to-slate-900 border border-indigo-500/30 rounded-2xl p-6 mb-6 shadow-2xl relative overflow-hidden">
-                <div className="absolute -top-10 -right-10 p-8 opacity-5 pointer-events-none"><CalendarDays size={200} /></div>
-                <div className="relative z-10">
-                  <h3 className="text-xs font-semibold text-indigo-300 mb-2 uppercase tracking-widest">Следующий платёж</h3>
-                  <div className="text-2xl font-bold text-white mb-6">
-                    {new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' }).format(new Date(nextPayment.date))}
-                  </div>
-                  <div className="flex flex-col xl:flex-row xl:items-end justify-between gap-6">
-                    <div>
-                      <div className="text-sm text-slate-400 mb-1">К оплате:</div>
-                      <div className="text-4xl sm:text-5xl font-extrabold text-white flex items-baseline gap-2">
-                        {formatMoney(nextPayment.total_payment + getInsuranceForMonth(nextPayment.date))}
-                      </div>
-                      {(nextPayment.extra_payment > 0 || getInsuranceForMonth(nextPayment.date) > 0) && (
-                        <div className="text-sm font-medium text-slate-400 mt-2 flex flex-wrap gap-x-2">
-                          <span className="text-slate-500">Базовый: {formatMoney(nextPayment.total_payment - nextPayment.extra_payment)}</span>
-                          {nextPayment.extra_payment > 0 && <span className="text-indigo-400">+ {formatMoney(nextPayment.extra_payment)} доср.</span>}
-                          {getInsuranceForMonth(nextPayment.date) > 0 && <span className="text-amber-500">+ {formatMoney(getInsuranceForMonth(nextPayment.date))} страх.</span>}
-                        </div>
-                      )}
-                    </div>
-                    <div className="flex flex-col sm:flex-row gap-3 w-full xl:w-auto mt-4 xl:mt-0">
-                      <button onClick={(e) => handleTogglePaidMonth(e as any, currentLoanId!, nextPayment.payment_number, false)} className="bg-emerald-600 hover:bg-emerald-500 text-white font-semibold py-3 px-6 rounded-xl transition-all shadow-lg shadow-emerald-900/20 flex items-center justify-center gap-2 active:scale-95">
-                        <CheckCircle2 size={20} /> Оплатить по графику
-                      </button>
-                      <button onClick={openEpModalForNextPayment} className="bg-slate-800 hover:bg-slate-700 border border-indigo-500/30 text-indigo-300 font-semibold py-3 px-6 rounded-xl transition-all flex items-center justify-center gap-2 active:scale-95 shadow-lg">
-                        <Zap size={20} /> Оплатить больше
-                      </button>
-                    </div>
                   </div>
                 </div>
               </div>
