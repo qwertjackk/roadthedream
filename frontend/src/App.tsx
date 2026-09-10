@@ -4,7 +4,7 @@ import * as XLSX from 'xlsx';
 import { 
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend 
 } from 'recharts';
-import { Calculator, Zap, Trash2, RotateCcw, CheckCircle2, FileText, Plus, User, LogOut, X, Download, Shield, ChevronDown, Pencil } from 'lucide-react';
+import { Calculator, Zap, Trash2, RotateCcw, CheckCircle2, FileText, Plus, User, LogOut, X, Download, Shield, ChevronDown, Pencil, Sparkles, CalendarDays } from 'lucide-react';
 
 const API_URL = 'http://localhost:8000';
 
@@ -24,7 +24,6 @@ const formatMoney = (amount: number) => {
   return new Intl.NumberFormat('ru-RU', { style: 'currency', currency: 'RUB', maximumFractionDigits: 0 }).format(amount);
 };
 
-// Обновленная функция сохранения: теперь хранит целый объект
 const saveLoanInputs = (id: string, data: any) => {
   localStorage.setItem(`loanInputs_${id}`, JSON.stringify(data));
 };
@@ -47,10 +46,17 @@ export default function App() {
 
   const [authToken, setAuthToken] = useState<string | null>(localStorage.getItem('authToken'));
   
+  // Глобальный режим работы приложения
+  const [appMode, setAppMode] = useState<'CALCULATOR' | 'TRACKER'>('CALCULATOR');
+  const isCalcMode = appMode === 'CALCULATOR';
+
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [isEpModalOpen, setIsEpModalOpen] = useState(false);
   const [isInsModalOpen, setIsInsModalOpen] = useState(false);
   
+  const [selectedRowAction, setSelectedRowAction] = useState<any | null>(null);
+  const [rowActionForm, setRowActionForm] = useState({ extraAmt: 0, strategy: 'REDUCE_TERM', insAmt: 0 });
+
   const [editingEpGroupIds, setEditingEpGroupIds] = useState<string[] | null>(null);
   const [editingInsGroupId, setEditingInsGroupId] = useState<string | null>(null);
   
@@ -83,8 +89,6 @@ export default function App() {
   const [loansList, setLoansList] = useState<any[]>([]);
   const [scheduleData, setScheduleData] = useState<any>(null);
   const [activeExtraPayments, setActiveExtraPayments] = useState<any[]>([]);
-  
-  // Хранилище независимых страховок
   const [activeInsurances, setActiveInsurances] = useState<any[]>(() => {
     const saved = localStorage.getItem('mortgageInsurancesData');
     return saved ? JSON.parse(saved) : [];
@@ -99,7 +103,36 @@ export default function App() {
   const currentFormLoanAmount = formData.property_price - formData.down_payment;
   const activeLoanAmount = scheduleData ? Number(scheduleData.loan_info.initial_amount) : currentFormLoanAmount;
 
-  // ОПТИМИЗАЦИЯ: Быстрый поиск страховки для месяца
+  // Изоляция данных на основе префиксов
+  const displayedLoans = useMemo(() => {
+    return loansList.filter(l => isCalcMode ? l.name.startsWith('[C]') : !l.name.startsWith('[C]'));
+  }, [loansList, isCalcMode]);
+
+  const handleModeSwitch = (mode: 'CALCULATOR' | 'TRACKER') => {
+    setAppMode(mode);
+    setFormData(defaultForm);
+    setScheduleData(null);
+    setCurrentLoanId(null);
+    setActiveExtraPayments([]);
+    setActiveInsurances([]);
+    
+    const modeLoans = loansList.filter(l => mode === 'CALCULATOR' ? l.name.startsWith('[C]') : !l.name.startsWith('[C]'));
+    if (modeLoans.length > 0) {
+      loadLoanData(modeLoans[0].id);
+    }
+  };
+
+  const isMonthPaid = (dateString: string) => {
+    if (isCalcMode) return false; // В калькуляторе нет истории оплат
+    if (!scheduleData || !scheduleData.paid_payment_numbers) return false;
+    const targetDate = new Date(dateString);
+    return scheduleData.schedule.some((row: any) => {
+      if (!scheduleData.paid_payment_numbers.includes(row.payment_number)) return false;
+      const rDate = new Date(row.date);
+      return rDate.getFullYear() === targetDate.getFullYear() && rDate.getMonth() === targetDate.getMonth();
+    });
+  };
+
   const insuranceMap = useMemo(() => {
     const map: Record<string, number> = {};
     activeInsurances.forEach(ins => {
@@ -115,6 +148,13 @@ export default function App() {
     return insuranceMap[`${d.getFullYear()}-${d.getMonth()}`] || 0;
   };
 
+  const nextPayment = useMemo(() => {
+    if (isCalcMode || !scheduleData) return null;
+    return scheduleData.schedule.find(
+      (row: any) => !scheduleData.paid_payment_numbers.includes(row.payment_number) && row.total_payment > 0
+    );
+  }, [scheduleData, isCalcMode]);
+
   let totalInsurance = 0;
   if (scheduleData) {
     scheduleData.schedule.forEach((row: any) => {
@@ -122,13 +162,88 @@ export default function App() {
     });
   }
 
-  // УМНАЯ ГРУППИРОВКА ДОСРОЧНЫХ ПЛАТЕЖЕЙ + РАСЧЕТ ЭКОНОМИИ
+  const rowActionPreview = useMemo(() => {
+    if (!selectedRowAction || rowActionForm.extraAmt <= 0 || !scheduleData) return null;
+    const extra = rowActionForm.extraAmt;
+    const r = formData.interest_rate / 100 / 12;
+    const S = selectedRowAction.remaining_balance + selectedRowAction.principal_payment;
+    const P = selectedRowAction.total_payment - (selectedRowAction.extra_payment || 0);
+    
+    try {
+      if (rowActionForm.strategy === 'REDUCE_TERM' && formData.payment_type === 'ANNUITY') {
+        const currentN = -Math.log(1 - S * r / P) / Math.log(1 + r);
+        const S_new = S - extra;
+        if (S_new <= 0) {
+          const remM = scheduleData.total_months - selectedRowAction.payment_number;
+          return { money: scheduleData.total_interest, months: remM }; 
+        }
+        const newN = -Math.log(1 - S_new * r / P) / Math.log(1 + r);
+        const savedMonths = Math.round(currentN - newN);
+        const savedMoney = ((currentN * P) - S) - ((newN * P) - S_new);
+        return { money: Math.max(0, savedMoney), months: Math.max(0, savedMonths) };
+      } else {
+        const remainingYears = (scheduleData.total_months - selectedRowAction.payment_number) / 12;
+        const savedMoney = extra * (formData.interest_rate / 100) * (remainingYears * 0.55);
+        return { money: Math.max(0, savedMoney), months: 0 };
+      }
+    } catch (e) { return null; }
+  }, [selectedRowAction, rowActionForm.extraAmt, rowActionForm.strategy, formData, scheduleData]);
+
+  const handleRowClick = (row: any) => {
+    if (isCalcMode) return; 
+    if (isMonthPaid(row.date)) return; 
+    
+    const exactExtras = activeExtraPayments.filter(ep => ep.payment_date === row.date && !ep.is_recurring);
+    const existingExtraAmt = exactExtras.reduce((acc, ep) => acc + Number(ep.amount), 0);
+    const strategy = exactExtras.length > 0 ? exactExtras[0].strategy : 'REDUCE_TERM';
+    const existingInsAmt = getInsuranceForMonth(row.date);
+
+    setRowActionForm({ extraAmt: existingExtraAmt, strategy: strategy, insAmt: existingInsAmt });
+    setSelectedRowAction(row);
+  };
+
+  const handleRowActionSave = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!currentLoanId || !selectedRowAction) return;
+    setExtraLoading(true);
+
+    try {
+      const exactExtras = activeExtraPayments.filter(ep => ep.payment_date === selectedRowAction.date && !ep.is_recurring);
+      if (exactExtras.length > 0) {
+        await Promise.all(exactExtras.map(ep => axios.delete(`${API_URL}/extra-payments/${ep.id}`)));
+      }
+      
+      if (rowActionForm.extraAmt > 0) {
+        await axios.post(`${API_URL}/loans/${currentLoanId}/extra-payments`, {
+          amount: rowActionForm.extraAmt, payment_date: selectedRowAction.date, strategy: rowActionForm.strategy, is_recurring: false
+        });
+      }
+
+      const dateStr = selectedRowAction.date;
+      const dDate = new Date(dateStr);
+      let updatedInsurances = activeInsurances.filter(ins => {
+        const iD = new Date(ins.payment_date);
+        return !(iD.getFullYear() === dDate.getFullYear() && iD.getMonth() === dDate.getMonth());
+      });
+
+      if (rowActionForm.insAmt > 0) {
+        updatedInsurances.push({ id: Date.now().toString() + Math.random(), groupId: Date.now().toString(), amount: rowActionForm.insAmt, payment_date: dateStr });
+      }
+      
+      setActiveInsurances(updatedInsurances);
+      saveLoanInputs(currentLoanId, { price: formData.property_price, down: formData.down_payment, insurances: updatedInsurances });
+
+      await loadLoanData(currentLoanId);
+      setSelectedRowAction(null);
+    } catch (error) { alert("Ошибка при сохранении платежа"); } finally { setExtraLoading(false); }
+  };
+
   const groupedPayments = useMemo(() => {
+    if (!isCalcMode) return [];
     const groups: any[] = [];
     const usedIds = new Set();
     const sorted = [...activeExtraPayments].sort((a, b) => new Date(a.payment_date).getTime() - new Date(b.payment_date).getTime());
-    
-    // Предварительный расчет весов для вычисления экономии
+    const totalExtraPaidAll = sorted.reduce((acc, ep) => acc + Number(ep.amount), 0);
     const groupsRaw: any[] = [];
     let totalWeight = 0;
 
@@ -156,7 +271,6 @@ export default function App() {
         }
       }
 
-      // Математика вклада платежа
       let weight = 0;
       if (ep.is_recurring && scheduleData) {
         const d = new Date(ep.payment_date), start = new Date(formData.start_date);
@@ -178,10 +292,10 @@ export default function App() {
     });
 
     return groups;
-  }, [activeExtraPayments, scheduleData, formData.start_date]);
+  }, [activeExtraPayments, scheduleData, formData.start_date, isCalcMode]);
 
-  // ГРУППИРОВКА СТРАХОВОК
   const groupedInsurances = useMemo(() => {
+    if (!isCalcMode) return [];
     const groups: any[] = [];
     const groupedByGroupId = activeInsurances.reduce((acc, ins) => {
       if (!acc[ins.groupId]) acc[ins.groupId] = [];
@@ -199,7 +313,7 @@ export default function App() {
       });
     }
     return groups.sort((a,b) => new Date(a.payment_date).getTime() - new Date(b.payment_date).getTime());
-  }, [activeInsurances]);
+  }, [activeInsurances, isCalcMode]);
 
   useEffect(() => { localStorage.setItem('mortgageFormData', JSON.stringify(formData)); }, [formData]);
   useEffect(() => { localStorage.setItem('mortgageInsurancesData', JSON.stringify(activeInsurances)); }, [activeInsurances]);
@@ -221,6 +335,11 @@ export default function App() {
     setIsEpModalOpen(true);
   };
 
+  const openEpModalForNextPayment = () => {
+    if (!nextPayment) return;
+    handleRowClick(nextPayment);
+  };
+
   const openInsModal = (group: any = null) => {
     if (group) {
       const d = new Date(group.payment_date);
@@ -238,32 +357,49 @@ export default function App() {
     const payDay = new Date(formData.first_payment_date).getDate();
     const startMonthIndex = MONTHS.indexOf(insForm.startMonth);
     let currentPayDate = new Date(Number(insForm.startYear), startMonthIndex, payDay);
-    
     const end = new Date(formData.start_date); 
     end.setFullYear(end.getFullYear() + formData.term_years);
     
     const newInsurances = [];
-    const groupId = editingInsGroupId || Date.now().toString();
+    const groupId = Date.now().toString(); 
     
     if (insForm.frequency === 'ONCE') {
-       newInsurances.push({ id: Date.now().toString() + Math.random(), groupId, amount: insForm.amount, payment_date: currentPayDate.toISOString().split('T')[0] });
+       const dStr = currentPayDate.toISOString().split('T')[0];
+       if (!isMonthPaid(dStr)) newInsurances.push({ id: Date.now().toString() + Math.random(), groupId, amount: insForm.amount, payment_date: dStr });
     } else {
        while(currentPayDate <= end) {
-         newInsurances.push({ id: Date.now().toString() + Math.random(), groupId, amount: insForm.amount, payment_date: currentPayDate.toISOString().split('T')[0] });
+         const dStr = currentPayDate.toISOString().split('T')[0];
+         if (!isMonthPaid(dStr)) newInsurances.push({ id: Date.now().toString() + Math.random(), groupId, amount: insForm.amount, payment_date: dStr });
          currentPayDate.setFullYear(currentPayDate.getFullYear() + 1);
        }
     }
     
-    const filtered = activeInsurances.filter(ins => ins.groupId !== editingInsGroupId);
-    const updated = [...filtered, ...newInsurances];
+    const keptInsurances = activeInsurances.filter(ins => {
+      if (ins.groupId !== editingInsGroupId) return true;
+      return isMonthPaid(ins.payment_date);
+    });
     
+    const updated = [...keptInsurances, ...newInsurances];
     setActiveInsurances(updated);
     if (currentLoanId) saveLoanInputs(currentLoanId, { price: formData.property_price, down: formData.down_payment, insurances: updated });
     setIsInsModalOpen(false);
   };
 
   const handleDeleteInsuranceGroup = (groupId: string) => {
-    const updated = activeInsurances.filter(ins => ins.groupId !== groupId);
+    const groupItems = activeInsurances.filter(i => i.groupId === groupId);
+    const toDelete = groupItems.filter(i => !isMonthPaid(i.payment_date));
+    
+    if (toDelete.length === 0) {
+      alert("Нельзя удалить страховки, которые уже оплачены."); return;
+    }
+    if (toDelete.length < groupItems.length) {
+      if (!window.confirm("Часть страховок из этого каскада уже оплачена. Удалить только будущие (неоплаченные)?")) return;
+    }
+
+    const updated = activeInsurances.filter(ins => {
+      if (ins.groupId !== groupId) return true;
+      return isMonthPaid(ins.payment_date);
+    });
     setActiveInsurances(updated);
     if (currentLoanId) saveLoanInputs(currentLoanId, { price: formData.property_price, down: formData.down_payment, insurances: updated });
   };
@@ -292,13 +428,16 @@ export default function App() {
       }
       const res = await axios.get(url);
       setLoansList(res.data);
+      
+      const modeLoans = res.data.filter((l: any) => isCalcMode ? l.name.startsWith('[C]') : !l.name.startsWith('[C]'));
+      
       if (forceFallback) {
-        if (res.data.length > 0) handleSelectLoan(res.data[0]);
+        if (modeLoans.length > 0) handleSelectLoan(modeLoans[0]);
         else handleNewLoanClick(); return;
       }
       const targetId = selectId || currentLoanId;
-      if (targetId && res.data.some((l: any) => l.id === targetId)) loadLoanData(targetId);
-      else if (res.data.length > 0) handleSelectLoan(res.data[0]);
+      if (targetId && modeLoans.some((l: any) => l.id === targetId)) loadLoanData(targetId);
+      else if (modeLoans.length > 0) handleSelectLoan(modeLoans[0]);
       else handleNewLoanClick();
     } catch (error) { console.error(error); }
   };
@@ -311,19 +450,16 @@ export default function App() {
       const loanInfo = scheduleRes.data.loan_info;
       const savedInputs = getLoanInputs(loanId);
       
-      let priceToSet = Number(loanInfo.initial_amount);
-      let downToSet = 0;
-      let insToSet = [];
-
+      let priceToSet = Number(loanInfo.initial_amount), downToSet = 0, insToSet = [];
       if (savedInputs) {
         if (savedInputs.price) priceToSet = savedInputs.price;
         if (savedInputs.down) downToSet = savedInputs.down;
         if (savedInputs.insurances) insToSet = savedInputs.insurances;
       }
-
       setActiveInsurances(insToSet);
       setFormData({
-        name: loanInfo.name, property_price: priceToSet, down_payment: downToSet,
+        name: loanInfo.name.replace(/^\[[CT]\]\s*/, '').trim() || 'Новая ипотека', 
+        property_price: priceToSet, down_payment: downToSet,
         interest_rate: Number(loanInfo.interest_rate), term_years: loanInfo.term_months / 12,
         start_date: loanInfo.start_date, first_payment_date: loanInfo.first_payment_date, payment_type: loanInfo.payment_type
       });
@@ -338,8 +474,11 @@ export default function App() {
     if (currentFormLoanAmount <= 0) { alert("Сумма кредита должна быть больше нуля!"); return; }
     setLoading(true);
     try {
+      const pureName = formData.name.replace(/^\[[CT]\]\s*/, '').trim() || 'Новая ипотека';
+      const payloadName = `${isCalcMode ? '[C]' : '[T]'} ${pureName}`;
+      
       const payload = {
-        name: formData.name || 'Новая ипотека', initial_amount: currentFormLoanAmount, interest_rate: formData.interest_rate,
+        name: payloadName, initial_amount: currentFormLoanAmount, interest_rate: formData.interest_rate,
         term_months: formData.term_years * 12, start_date: formData.start_date, first_payment_date: formData.first_payment_date, payment_type: formData.payment_type
       };
       if (currentLoanId) {
@@ -379,43 +518,70 @@ export default function App() {
     
     setExtraLoading(true);
     try {
-      if (editingEpGroupIds) await Promise.all(editingEpGroupIds.map(id => axios.delete(`${API_URL}/extra-payments/${id}`)));
+      if (editingEpGroupIds) {
+        const idsToDelete = activeExtraPayments
+          .filter(ep => editingEpGroupIds.includes(ep.id))
+          .filter(ep => !isMonthPaid(ep.payment_date))
+          .map(ep => ep.id);
+        if (idsToDelete.length > 0) {
+          await Promise.all(idsToDelete.map(id => axios.delete(`${API_URL}/extra-payments/${id}`)));
+        }
+      }
 
       const payDay = new Date(formData.first_payment_date).getDate();
       const startMonthIndex = MONTHS.indexOf(epForm.startMonth);
       let currentPayDate = new Date(Number(epForm.startYear), startMonthIndex, payDay);
       const freq = epForm.frequency;
+      const promises = [];
 
       if (freq === 'ONCE') {
         const dStr = `${currentPayDate.getFullYear()}-${String(currentPayDate.getMonth() + 1).padStart(2, '0')}-${String(currentPayDate.getDate()).padStart(2, '0')}`;
-        await axios.post(`${API_URL}/loans/${currentLoanId}/extra-payments`, { amount: epForm.amount, payment_date: dStr, strategy: epForm.strategy, is_recurring: false });
+        if (!isMonthPaid(dStr)) promises.push(axios.post(`${API_URL}/loans/${currentLoanId}/extra-payments`, { amount: epForm.amount, payment_date: dStr, strategy: epForm.strategy, is_recurring: false }));
       } else if (freq === 'MONTHLY') {
         const dStr = `${currentPayDate.getFullYear()}-${String(currentPayDate.getMonth() + 1).padStart(2, '0')}-${String(currentPayDate.getDate()).padStart(2, '0')}`;
-        await axios.post(`${API_URL}/loans/${currentLoanId}/extra-payments`, { amount: epForm.amount, payment_date: dStr, strategy: epForm.strategy, is_recurring: true });
+        if (!isMonthPaid(dStr)) promises.push(axios.post(`${API_URL}/loans/${currentLoanId}/extra-payments`, { amount: epForm.amount, payment_date: dStr, strategy: epForm.strategy, is_recurring: true }));
       } else {
         const monthsToAdd = freq === 'QUARTERLY' ? 3 : freq === 'HALFYEARLY' ? 6 : 12;
         const end = new Date(formData.start_date); end.setFullYear(end.getFullYear() + formData.term_years);
-        const promises = [];
         while(currentPayDate <= end) {
           const dStr = `${currentPayDate.getFullYear()}-${String(currentPayDate.getMonth() + 1).padStart(2, '0')}-${String(currentPayDate.getDate()).padStart(2, '0')}`;
-          promises.push(axios.post(`${API_URL}/loans/${currentLoanId}/extra-payments`, { amount: epForm.amount, payment_date: dStr, strategy: epForm.strategy, is_recurring: false }));
+          if (!isMonthPaid(dStr)) promises.push(axios.post(`${API_URL}/loans/${currentLoanId}/extra-payments`, { amount: epForm.amount, payment_date: dStr, strategy: epForm.strategy, is_recurring: false }));
           currentPayDate.setMonth(currentPayDate.getMonth() + monthsToAdd);
         }
-        await Promise.all(promises);
       }
+      
+      if (promises.length > 0) {
+        await Promise.all(promises);
+      } else if (!editingEpGroupIds) {
+        alert("Указанный период уже был оплачен, новые платежи не добавлены.");
+      }
+      
       await loadLoanData(currentLoanId);
       setIsEpModalOpen(false);
     } catch (error) { alert("Ошибка при сохранении платежа"); } finally { setExtraLoading(false); }
   };
 
-  const handleDeleteExtraPaymentGroup = async (ids: string[]) => {
+  const handleDeleteExtraPaymentGroup = async (group: any) => {
     try {
-      await Promise.all(ids.map(id => axios.delete(`${API_URL}/extra-payments/${id}`)));
+      const idsToDelete = activeExtraPayments
+        .filter(ep => group.ids.includes(ep.id))
+        .filter(ep => !isMonthPaid(ep.payment_date))
+        .map(ep => ep.id);
+
+      if (idsToDelete.length === 0) {
+        alert("Нельзя удалить платежи, которые уже отмечены как оплаченные."); return;
+      }
+      if (idsToDelete.length < group.ids.length) {
+        if (!window.confirm("Часть платежей из этого каскада уже оплачена. Удалить только будущие (неоплаченные)?")) return;
+      }
+
+      await Promise.all(idsToDelete.map(id => axios.delete(`${API_URL}/extra-payments/${id}`)));
       await loadLoanData(currentLoanId!);
     } catch (error) { alert("Ошибка при удалении платежей"); }
   };
 
-  const handleTogglePaidMonth = async (loanId: string, paymentNumber: number, isPaid: boolean) => {
+  const handleTogglePaidMonth = async (e: React.MouseEvent, loanId: string, paymentNumber: number, isPaid: boolean) => {
+    e.stopPropagation(); 
     if (!loanId) return;
     try {
       if (isPaid) await axios.delete(`${API_URL}/loans/${loanId}/paid-months/${paymentNumber}`);
@@ -482,20 +648,23 @@ export default function App() {
   const tableComponent = useMemo(() => {
     if (!scheduleData) return null;
     return (
-      <div className="bg-slate-900 rounded-2xl shadow-lg border border-slate-800 overflow-hidden mt-6">
+      <div className="bg-slate-900 rounded-2xl shadow-lg border border-slate-800 overflow-hidden mb-6">
         <div className="flex flex-col sm:flex-row justify-between items-center p-4 border-b border-slate-800 bg-slate-950/50 gap-4">
           <h3 className="text-lg font-semibold text-white">Детальный график</h3>
-          <button onClick={exportToExcel} className="flex-1 sm:flex-none flex items-center justify-center space-x-2 text-sm text-emerald-400 hover:text-emerald-300 transition-colors bg-emerald-950/40 hover:bg-emerald-900/60 px-4 py-2 rounded-lg border border-emerald-900/50 shadow-sm">
-            <Download size={16} /><span>В Excel</span>
-          </button>
+          <div className="flex gap-4 items-center">
+            {!isCalcMode && <span className="text-xs text-slate-500 hidden sm:block">💡 Кликните на строку, чтобы добавить факт платежа</span>}
+            <button onClick={exportToExcel} className="flex-1 sm:flex-none flex items-center justify-center space-x-2 text-sm text-emerald-400 hover:text-emerald-300 transition-colors bg-emerald-950/40 hover:bg-emerald-900/60 px-4 py-2 rounded-lg border border-emerald-900/50 shadow-sm">
+              <Download size={16} /><span>В Excel</span>
+            </button>
+          </div>
         </div>
-        <div className="overflow-x-auto h-[500px]">
+        <div className="overflow-x-auto h-[600px] custom-scrollbar">
           <table className="w-full text-left text-sm whitespace-nowrap">
             <thead className="bg-slate-950 text-slate-400 sticky top-0 shadow-sm z-10">
               <tr>
-                <th className="p-4 font-medium border-b border-slate-800 text-center w-16">✅</th>
+                {!isCalcMode && <th className="p-4 font-medium border-b border-slate-800 text-center w-16">✅</th>}
                 <th className="p-4 font-medium border-b border-slate-800">№ / Дата</th>
-                <th className="p-4 font-medium border-b border-slate-800">Платеж</th>
+                <th className="p-4 font-medium border-b border-slate-800">К оплате</th>
                 <th className="p-4 font-medium border-b border-slate-800">Тело долга</th>
                 <th className="p-4 font-medium border-b border-slate-800">Проценты</th>
                 <th className="p-4 font-medium text-indigo-400 border-b border-slate-800">Досрочно</th>
@@ -504,21 +673,27 @@ export default function App() {
             </thead>
             <tbody className="divide-y divide-slate-800/50">
               {scheduleData.schedule.filter((row: any) => row.total_payment > 0).map((row: any) => {
-                const isPaid = scheduleData.paid_payment_numbers.includes(row.payment_number);
+                const isPaid = !isCalcMode && scheduleData.paid_payment_numbers.includes(row.payment_number);
                 const currentInsurance = getInsuranceForMonth(row.date);
                 const isInsMonth = currentInsurance > 0;
                 
                 let rowClass = 'transition-colors ';
-                if (isPaid) rowClass += 'bg-emerald-950/20 opacity-75 ';
-                else if (isInsMonth) rowClass += 'bg-amber-900/20 border-l-2 border-l-amber-500 ';
-                else if (row.extra_payment > 0) rowClass += 'bg-indigo-900/10 hover:bg-slate-800/50 ';
-                else rowClass += 'hover:bg-slate-800/50 ';
+                if (!isCalcMode && !isPaid) rowClass += 'cursor-pointer ';
+                
+                if (isPaid) rowClass += 'bg-emerald-950/10 opacity-75 cursor-default ';
+                else if (isInsMonth) rowClass += 'bg-amber-900/10 border-l-2 border-l-amber-500 hover:bg-slate-800/80 ';
+                else if (row.extra_payment > 0) rowClass += 'bg-indigo-900/10 hover:bg-slate-800/80 ';
+                else rowClass += (!isCalcMode ? 'hover:bg-slate-800/50 ' : '');
 
                 return (
-                  <tr key={row.payment_number} className={rowClass}>
-                    <td className="p-4 text-center">
-                      <button onClick={() => handleTogglePaidMonth(currentLoanId!, row.payment_number, isPaid)} className={`p-1 rounded-lg transition-colors ${isPaid ? 'text-emerald-400 bg-emerald-900/40' : 'text-slate-600 hover:text-slate-400'}`}><CheckCircle2 size={20} /></button>
-                    </td>
+                  <tr key={row.payment_number} className={rowClass} onClick={() => handleRowClick(row)}>
+                    {!isCalcMode && (
+                      <td className="p-4 text-center">
+                        <button onClick={(e) => handleTogglePaidMonth(e, currentLoanId!, row.payment_number, isPaid)} className={`p-1 rounded-lg transition-colors ${isPaid ? 'text-emerald-400 bg-emerald-900/40' : 'text-slate-600 hover:text-slate-400'}`}>
+                          <CheckCircle2 size={20} />
+                        </button>
+                      </td>
+                    )}
                     <td className="p-4 text-slate-400">
                       <div className="flex items-center space-x-2">
                         <span>{row.payment_number} мес.</span>
@@ -529,12 +704,14 @@ export default function App() {
                     <td className="p-4 font-medium text-white">
                       <div className="flex flex-col">
                         <span>{formatMoney(row.total_payment - row.extra_payment + currentInsurance)}</span>
-                        {isInsMonth && <span className="text-[10px] text-amber-500 flex items-center gap-1 mt-0.5"><Shield size={10} /> + страховка</span>}
+                        {isInsMonth && <span className="text-[10px] text-amber-500 flex items-center gap-1 mt-0.5"><Shield size={10} /> + {formatNumber(currentInsurance)} ₽</span>}
                       </div>
                     </td>
                     <td className="p-4 text-emerald-400">{formatMoney(row.principal_payment)}</td>
                     <td className="p-4 text-red-400">{formatMoney(row.interest_payment)}</td>
-                    <td className="p-4 text-indigo-400 font-medium">{row.extra_payment > 0 ? `+ ${formatMoney(row.extra_payment)}` : '-'}</td>
+                    <td className="p-4 text-indigo-400 font-medium">
+                      {row.extra_payment > 0 ? `+ ${formatMoney(row.extra_payment)}` : '-'}
+                    </td>
                     <td className="p-4 text-slate-300 font-medium">{formatMoney(row.remaining_balance)}</td>
                   </tr>
                 );
@@ -544,11 +721,70 @@ export default function App() {
         </div>
       </div>
     );
-  }, [scheduleData, currentLoanId, activeInsurances]);
+  }, [scheduleData, currentLoanId, activeInsurances, isCalcMode]);
 
   return (
     <div className="min-h-screen bg-slate-950 p-4 md:p-8 font-sans text-slate-200">
       
+      {/* МОДАЛКА: ДЕЙСТВИЕ СО СТРОКОЙ (ТРЕКЕР) */}
+      {selectedRowAction && !isCalcMode && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 w-full max-w-md shadow-2xl relative">
+            <button onClick={() => setSelectedRowAction(null)} className="absolute top-4 right-4 text-slate-400 hover:text-white transition-colors"><X size={20} /></button>
+            <h3 className="text-xl font-bold text-white mb-1 flex items-center gap-2">
+              Платеж №{selectedRowAction.payment_number}
+            </h3>
+            <p className="text-sm text-slate-400 mb-6">{new Date(selectedRowAction.date).toLocaleDateString('ru-RU', {day: 'numeric', month: 'long', year: 'numeric'})}</p>
+            
+            <form onSubmit={handleRowActionSave} className="space-y-6">
+              
+              <div className="space-y-3">
+                <div className="flex items-center gap-2 text-indigo-400">
+                  <Zap size={16} /> <span className="text-sm font-semibold uppercase tracking-wider">Факт: Досрочный платёж</span>
+                </div>
+                <div className="relative bg-slate-950 border border-indigo-900/50 rounded-xl p-2 focus-within:border-indigo-500 transition-colors">
+                  <label className="text-[10px] text-slate-500 absolute top-2 left-3 uppercase tracking-wider font-medium">Сумма (₽)</label>
+                  <input type="text" value={formatNumber(rowActionForm.extraAmt)} onChange={(e) => setRowActionForm({...rowActionForm, extraAmt: parseNumber(e.target.value)})} className="w-full bg-transparent pt-5 pb-1 px-3 outline-none text-white font-medium text-lg" />
+                </div>
+                <div className="relative bg-slate-950 border border-indigo-900/50 rounded-xl focus-within:border-indigo-500 transition-colors">
+                  <select value={rowActionForm.strategy} onChange={(e) => setRowActionForm({...rowActionForm, strategy: e.target.value})} className="w-full appearance-none bg-transparent text-slate-200 py-3 pl-4 pr-10 outline-none font-medium text-sm cursor-pointer">
+                    <option value="REDUCE_TERM">Уменьшить срок</option>
+                    <option value="REDUCE_PAYMENT">Уменьшить платеж</option>
+                  </select>
+                  <ChevronDown size={16} className="absolute right-3 top-3.5 text-slate-500 pointer-events-none" />
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                <div className="flex items-center gap-2 text-amber-500">
+                  <Shield size={16} /> <span className="text-sm font-semibold uppercase tracking-wider">Факт: Страховка</span>
+                </div>
+                <div className="relative bg-slate-950 border border-amber-900/40 rounded-xl p-2 focus-within:border-amber-500 transition-colors">
+                  <label className="text-[10px] text-slate-500 absolute top-2 left-3 uppercase tracking-wider font-medium">Сумма (₽)</label>
+                  <input type="text" value={formatNumber(rowActionForm.insAmt)} onChange={(e) => setRowActionForm({...rowActionForm, insAmt: parseNumber(e.target.value)})} className="w-full bg-transparent pt-5 pb-1 px-3 outline-none text-white font-medium text-lg" />
+                </div>
+              </div>
+
+              {rowActionPreview && (rowActionPreview.money > 0 || rowActionPreview.months > 0) && (
+                <div className="bg-emerald-950/30 border border-emerald-900/50 rounded-xl p-4 flex items-start gap-3">
+                  <Sparkles className="text-emerald-400 shrink-0 mt-0.5" size={18} />
+                  <div>
+                    <div className="text-xs text-emerald-400/80 mb-1 uppercase tracking-wider font-semibold">Ваша выгода</div>
+                    <div className="text-sm text-emerald-300 font-medium">
+                      Этот платеж сэкономит вам <span className="font-bold text-emerald-400">~{formatMoney(rowActionPreview.money)}</span> {rowActionPreview.months > 0 ? `и ${rowActionPreview.months} мес.` : ''}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              <button type="submit" disabled={extraLoading} className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-medium py-3 rounded-xl transition-all shadow-lg shadow-indigo-900/20 disabled:bg-indigo-900 mt-2">
+                {extraLoading ? 'Сохранение...' : 'Запланировать'}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* МОДАЛКА: АВТОРИЗАЦИЯ */}
       {isAuthModalOpen && (
         <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
@@ -578,13 +814,13 @@ export default function App() {
         </div>
       )}
 
-      {/* МОДАЛКА: ДОСРОЧНЫЙ ПЛАТЕЖ */}
-      {isEpModalOpen && (
+      {/* МОДАЛКА: МАССОВЫЙ ДОСРОЧНЫЙ ПЛАТЕЖ */}
+      {isEpModalOpen && isCalcMode && (
         <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 w-full max-w-md shadow-2xl relative">
             <button onClick={() => setIsEpModalOpen(false)} className="absolute top-4 right-4 text-slate-400 hover:text-white transition-colors"><X size={20} /></button>
             <h3 className="text-xl font-bold text-white mb-6 flex items-center gap-2">
-              <Zap className="text-indigo-400" size={24}/> {editingEpGroupIds ? 'Редактировать платёж' : 'Досрочное погашение'}
+              <Zap className="text-indigo-400" size={24}/> {editingEpGroupIds ? 'Редактировать группу' : 'Досрочное погашение'}
             </h3>
             <form onSubmit={handleAddExtraPayment} className="space-y-4">
               <div className="relative bg-slate-950 border border-indigo-900/50 rounded-xl p-2 focus-within:border-indigo-500 transition-colors">
@@ -636,13 +872,13 @@ export default function App() {
         </div>
       )}
 
-      {/* МОДАЛКА: СТРАХОВКА */}
-      {isInsModalOpen && (
+      {/* МОДАЛКА: МАССОВАЯ СТРАХОВКА */}
+      {isInsModalOpen && isCalcMode && (
         <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 w-full max-w-md shadow-2xl relative">
             <button onClick={() => setIsInsModalOpen(false)} className="absolute top-4 right-4 text-slate-400 hover:text-white transition-colors"><X size={20} /></button>
             <h3 className="text-xl font-bold text-white mb-6 flex items-center gap-2">
-              <Shield className="text-amber-500" size={24}/> {editingInsGroupId ? 'Редактировать страховку' : 'Новая страховка'}
+              <Shield className="text-amber-500" size={24}/> {editingInsGroupId ? 'Редактировать страховки' : 'Пакетная страховка'}
             </h3>
             <form onSubmit={handleSaveInsurance} className="space-y-4">
               <div className="relative bg-slate-950 border border-amber-900/40 rounded-xl p-2 focus-within:border-amber-500 transition-colors">
@@ -685,40 +921,34 @@ export default function App() {
       {/* ОСНОВНОЙ ИНТЕРФЕЙС */}
       <div className="max-w-7xl mx-auto space-y-6">
         
-        <header className="flex items-center justify-between mb-2">
-          <div className="flex items-center space-x-3">
+        <header className="flex flex-col md:flex-row items-center justify-between mb-2 gap-4">
+          <div className="flex items-center space-x-3 w-full md:w-auto">
             <div className="bg-indigo-600 p-2 rounded-lg text-white shadow-lg shadow-indigo-900/20"><Calculator size={28} /></div>
             <h1 className="text-3xl font-bold text-white tracking-tight">zproject</h1>
           </div>
-          <div className="flex items-center space-x-4">
-            {scheduleData && scheduleData.saved_interest > 0 && (
-              <div className="hidden lg:flex items-center space-x-4 bg-emerald-950/40 border border-emerald-900/50 px-4 py-2 rounded-xl">
-                <div className="text-emerald-400 font-bold flex items-center space-x-1"><span>🎉 Сэкономлено: {formatMoney(scheduleData.saved_interest)}</span></div>
-                <div className="text-xs text-emerald-300/80 bg-emerald-900/40 px-2 py-1 rounded">Срок сокращен на {scheduleData.saved_months} мес.</div>
-              </div>
+          
+          <div className="flex items-center bg-slate-900 border border-slate-800 rounded-lg p-1 w-full md:w-auto justify-end">
+            {authToken ? (
+              <button onClick={handleLogout} className="flex items-center space-x-2 px-3 py-1.5 text-slate-400 hover:text-white transition-colors text-sm font-medium"><LogOut size={16} /><span className="hidden sm:inline">Выйти</span></button>
+            ) : (
+              <button onClick={() => setIsAuthModalOpen(true)} className="flex items-center space-x-2 px-3 py-1.5 text-indigo-400 hover:text-indigo-300 transition-colors text-sm font-medium"><User size={16} /><span className="hidden sm:inline">Войти</span></button>
             )}
-            <div className="flex items-center bg-slate-900 border border-slate-800 rounded-lg p-1">
-              {authToken ? (
-                <button onClick={handleLogout} className="flex items-center space-x-2 px-3 py-1.5 text-slate-400 hover:text-white transition-colors text-sm font-medium"><LogOut size={16} /><span className="hidden sm:inline">Выйти</span></button>
-              ) : (
-                <button onClick={() => setIsAuthModalOpen(true)} className="flex items-center space-x-2 px-3 py-1.5 text-indigo-400 hover:text-indigo-300 transition-colors text-sm font-medium"><User size={16} /><span className="hidden sm:inline">Войти</span></button>
-              )}
-            </div>
           </div>
         </header>
 
         <div className="flex space-x-2 overflow-x-auto pb-2 custom-scrollbar">
-          {loansList.map(loan => (
+          {displayedLoans.map(loan => (
             <button key={loan.id} onClick={() => handleSelectLoan(loan)} className={`px-4 py-2 rounded-lg whitespace-nowrap text-sm font-medium transition-all duration-200 ${currentLoanId === loan.id ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-900/20' : 'bg-slate-900 text-slate-400 hover:bg-slate-800 border border-slate-800'}`}>
-              {loan.name}
+              {loan.name.replace(/^\[[CT]\]\s*/, '')}
             </button>
           ))}
-          <button onClick={handleNewLoanClick} className={`flex items-center space-x-1 px-4 py-2 rounded-lg whitespace-nowrap text-sm font-medium transition-all duration-200 border border-dashed ${!currentLoanId && loansList.length > 0 ? 'border-indigo-500 text-indigo-400 bg-indigo-950/30' : 'border-slate-700 text-slate-400 hover:bg-slate-900 hover:text-slate-300'}`}>
+          <button onClick={handleNewLoanClick} className={`flex items-center space-x-1 px-4 py-2 rounded-lg whitespace-nowrap text-sm font-medium transition-all duration-200 border border-dashed ${!currentLoanId && displayedLoans.length > 0 ? 'border-indigo-500 text-indigo-400 bg-indigo-950/30' : 'border-slate-700 text-slate-400 hover:bg-slate-900 hover:text-slate-300'}`}>
             <Plus size={16} /><span>Добавить</span>
           </button>
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          
           <div className="bg-slate-900 p-6 rounded-2xl shadow-xl border border-slate-800 h-fit sticky top-6">
             <div className="flex justify-between items-center mb-6">
               <h2 className="text-xl font-semibold text-white">Параметры ипотеки</h2>
@@ -781,14 +1011,90 @@ export default function App() {
             </form>
           </div>
 
-          <div className="lg:col-span-2 space-y-6">
+          <div className="lg:col-span-2">
+            
+            {/* ТУМБЛЕР ПЕРЕКЛЮЧЕНИЯ РЕЖИМОВ */}
+            <div className="flex justify-center mb-8 relative z-20">
+              <div className="bg-slate-900/80 backdrop-blur-md border border-slate-800 p-1.5 rounded-2xl flex shadow-2xl">
+                <button 
+                  onClick={() => handleModeSwitch('CALCULATOR')} 
+                  className={`flex items-center gap-2 px-8 py-3 rounded-xl text-sm font-bold transition-all duration-300 ${isCalcMode ? 'bg-indigo-600 text-white shadow-[0_0_20px_rgba(99,102,241,0.4)]' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'}`}
+                >
+                  <Calculator size={20} /> Песочница (Планы)
+                </button>
+                <button 
+                  onClick={() => handleModeSwitch('TRACKER')} 
+                  className={`flex items-center gap-2 px-8 py-3 rounded-xl text-sm font-bold transition-all duration-300 ${!isCalcMode ? 'bg-emerald-600 text-white shadow-[0_0_20px_rgba(16,185,129,0.4)]' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'}`}
+                >
+                  <CheckCircle2 size={20} /> Трекер (Факты)
+                </button>
+              </div>
+            </div>
+
+            {/* БАННЕР ЭКОНОМИИ (Виден всегда) */}
+            {scheduleData && scheduleData.saved_interest > 0 && (
+              <div className="bg-emerald-950/20 border border-emerald-900/40 rounded-2xl p-5 mb-6 flex items-center gap-4 shadow-[0_0_15px_rgba(16,185,129,0.1)]">
+                <div className="bg-emerald-900/50 p-3 rounded-xl shrink-0">
+                  <Sparkles className="text-emerald-400" size={24} />
+                </div>
+                <div>
+                  <div className="text-[11px] uppercase tracking-wider font-semibold text-emerald-500/80 mb-1">
+                    {isCalcMode ? 'Ожидаемая экономия по плану' : 'Фактическая экономия от досрочных платежей'}
+                  </div>
+                  <div className="text-2xl font-bold text-emerald-400 flex items-baseline gap-2">
+                    {formatMoney(scheduleData.saved_interest)}
+                    <span className="text-sm font-medium text-emerald-500/70">и {scheduleData.saved_months} мес.</span>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* КАРТОЧКА СЛЕДУЮЩЕГО ПЛАТЕЖА (Только в Трекере) */}
+            {!isCalcMode && nextPayment && (
+              <div className="bg-gradient-to-br from-indigo-900/40 to-slate-900 border border-indigo-500/30 rounded-2xl p-6 mb-6 shadow-2xl relative overflow-hidden">
+                <div className="absolute -top-10 -right-10 p-8 opacity-5 pointer-events-none"><CalendarDays size={200} /></div>
+                <div className="relative z-10">
+                  <h3 className="text-xs font-semibold text-indigo-300 mb-2 uppercase tracking-widest">Следующий платёж</h3>
+                  <div className="text-2xl font-bold text-white mb-6">
+                    {new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' }).format(new Date(nextPayment.date))}
+                  </div>
+                  <div className="flex flex-col xl:flex-row xl:items-end justify-between gap-6">
+                    <div>
+                      <div className="text-sm text-slate-400 mb-1">К оплате:</div>
+                      <div className="text-4xl sm:text-5xl font-extrabold text-white flex items-baseline gap-2">
+                        {formatMoney(nextPayment.total_payment + getInsuranceForMonth(nextPayment.date))}
+                      </div>
+                      {(nextPayment.extra_payment > 0 || getInsuranceForMonth(nextPayment.date) > 0) && (
+                        <div className="text-sm font-medium text-slate-400 mt-2 flex flex-wrap gap-x-2">
+                          <span className="text-slate-500">Базовый: {formatMoney(nextPayment.total_payment - nextPayment.extra_payment)}</span>
+                          {nextPayment.extra_payment > 0 && <span className="text-indigo-400">+ {formatMoney(nextPayment.extra_payment)} доср.</span>}
+                          {getInsuranceForMonth(nextPayment.date) > 0 && <span className="text-amber-500">+ {formatMoney(getInsuranceForMonth(nextPayment.date))} страх.</span>}
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex flex-col sm:flex-row gap-3 w-full xl:w-auto mt-4 xl:mt-0">
+                      <button onClick={(e) => handleTogglePaidMonth(e as any, currentLoanId!, nextPayment.payment_number, false)} className="bg-emerald-600 hover:bg-emerald-500 text-white font-semibold py-3 px-6 rounded-xl transition-all shadow-lg shadow-emerald-900/20 flex items-center justify-center gap-2 active:scale-95">
+                        <CheckCircle2 size={20} /> Оплатить по графику
+                      </button>
+                      <button onClick={openEpModalForNextPayment} className="bg-slate-800 hover:bg-slate-700 border border-indigo-500/30 text-indigo-300 font-semibold py-3 px-6 rounded-xl transition-all flex items-center justify-center gap-2 active:scale-95 shadow-lg">
+                        <Zap size={20} /> Оплатить больше
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {scheduleData ? (
               <>
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
                   <div className="bg-slate-900 p-5 rounded-2xl shadow-lg border border-slate-800">
                     <div className="text-sm text-slate-400 mb-1">Осталось платить</div>
                     <div className="text-2xl font-bold text-white">
-                      {scheduleData.total_months} мес. <span className="text-sm font-normal text-slate-500">({(scheduleData.total_months / 12).toFixed(1)} лет)</span>
+                      {scheduleData.total_months - (!isCalcMode ? scheduleData.paid_payment_numbers.length : 0)} мес. 
+                      <span className="text-sm font-normal text-slate-500 ml-1">
+                        ({((scheduleData.total_months - (!isCalcMode ? scheduleData.paid_payment_numbers.length : 0)) / 12).toFixed(1)} лет)
+                      </span>
                     </div>
                   </div>
                   <div className="bg-slate-900 p-5 rounded-2xl shadow-lg border border-slate-800">
@@ -810,101 +1116,99 @@ export default function App() {
                   </div>
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  
-                  {/* КОМПАКТНЫЙ БЛОК: ДОСРОЧНЫЕ ПЛАТЕЖИ (НЕОН) */}
-                  <div className="bg-indigo-950/40 p-5 rounded-2xl border border-indigo-500/30 shadow-[0_0_15px_rgba(99,102,241,0.15)] flex flex-col h-full">
-                    <div className="flex justify-between items-center mb-4">
-                      <h3 className="text-lg font-semibold text-indigo-300 flex items-center gap-2">
-                        <Zap className="text-indigo-400" size={20} /> Досрочные платежи
-                      </h3>
-                      <button onClick={() => openEpModal(null)} className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-3 py-1.5 rounded-lg transition-colors font-medium shadow-lg shadow-indigo-900/20">
-                        + Добавить
-                      </button>
-                    </div>
-                    
-                    <div className="flex-1">
-                      {groupedPayments.length === 0 ? (
-                        <div className="text-indigo-400/50 text-sm text-center py-6 border-2 border-dashed border-indigo-900/50 rounded-xl h-full flex items-center justify-center">
-                          Нет запланированных платежей
-                        </div>
-                      ) : (
-                        <div className="space-y-2 max-h-[160px] overflow-y-auto custom-scrollbar pr-2">
-                          {groupedPayments.map((group: any, idx: number) => (
-                            <div key={idx} className="flex items-center justify-between bg-slate-950 border border-indigo-900/50 rounded-lg p-3 group-item transition-colors">
-                              <div className="flex flex-col">
-                                <div className="text-sm font-bold text-emerald-400">{formatMoney(Number(group.amount))}</div>
-                                <div className="text-[10px] text-slate-400">
-                                  {group.displayFreq} <span className="opacity-70">({new Date(group.payment_date).toLocaleDateString('ru-RU', {month: 'short', year: 'numeric'})})</span>
-                                </div>
-                                {group.savedInterest > 0 && (
-                                  <div className="text-[10px] text-emerald-400 mt-1 font-medium">
-                                    Экономия: ~{formatMoney(group.savedInterest)} {group.savedMonths > 0 ? `и ${group.savedMonths} мес.` : ''}
+                {isCalcMode && (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                    {/* ПРАВИЛА: ДОСРОЧНЫЕ ПЛАТЕЖИ (МАССОВЫЕ) */}
+                    <div className="bg-indigo-950/40 p-5 rounded-2xl border border-indigo-500/30 shadow-[0_0_15px_rgba(99,102,241,0.15)] flex flex-col h-full">
+                      <div className="flex justify-between items-center mb-4">
+                        <h3 className="text-lg font-semibold text-indigo-300 flex items-center gap-2">
+                          <Zap className="text-indigo-400" size={20} /> Планы досрочек
+                        </h3>
+                        <button onClick={() => openEpModal(null)} className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-3 py-1.5 rounded-lg transition-colors font-medium shadow-lg shadow-indigo-900/20">
+                          + Добавить
+                        </button>
+                      </div>
+                      
+                      <div className="flex-1">
+                        {groupedPayments.length === 0 ? (
+                          <div className="text-indigo-400/50 text-sm text-center py-6 border-2 border-dashed border-indigo-900/50 rounded-xl h-full flex items-center justify-center">
+                            Нет запланированных правил
+                          </div>
+                        ) : (
+                          <div className="space-y-2 max-h-[160px] overflow-y-auto custom-scrollbar pr-2">
+                            {groupedPayments.map((group: any, idx: number) => (
+                              <div key={idx} className="flex items-center justify-between bg-slate-950 border border-indigo-900/50 rounded-lg p-3 group-item transition-colors">
+                                <div className="flex flex-col">
+                                  <div className="text-sm font-bold text-emerald-400">{formatMoney(Number(group.amount))}</div>
+                                  <div className="text-[10px] text-slate-400">
+                                    {group.displayFreq} <span className="opacity-70">({new Date(group.payment_date).toLocaleDateString('ru-RU', {month: 'short', year: 'numeric'})})</span>
                                   </div>
-                                )}
-                              </div>
-                              <div className="flex items-center space-x-1">
-                                <button onClick={() => openEpModal(group)} className="text-slate-500 hover:text-indigo-400 transition-colors p-2 rounded-md" title="Редактировать">
-                                  <Pencil size={16} />
-                                </button>
-                                <button onClick={() => handleDeleteExtraPaymentGroup(group.ids)} className="text-slate-500 hover:text-red-400 transition-colors p-2 rounded-md" title="Удалить">
-                                  <Trash2 size={16} />
-                                </button>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* КОМПАКТНЫЙ БЛОК: СТРАХОВКА (НЕОН) */}
-                  <div className="bg-amber-950/30 p-5 rounded-2xl border border-amber-500/30 shadow-[0_0_15px_rgba(245,158,11,0.15)] flex flex-col h-full">
-                    <div className="flex justify-between items-center mb-4">
-                      <h3 className="text-lg font-semibold text-amber-500 flex items-center gap-2">
-                        <Shield className="text-amber-500" size={20} /> Страхование
-                      </h3>
-                      <button onClick={() => openInsModal(null)} className="bg-amber-600 hover:bg-amber-500 text-white text-xs px-3 py-1.5 rounded-lg transition-colors font-medium shadow-lg shadow-amber-900/20">
-                        + Добавить
-                      </button>
-                    </div>
-                    
-                    <div className="flex-1">
-                      {groupedInsurances.length === 0 ? (
-                        <div className="text-amber-500/50 text-sm text-center py-6 border-2 border-dashed border-amber-900/50 rounded-xl h-full flex items-center justify-center">
-                          Страховка не настроена
-                        </div>
-                      ) : (
-                        <div className="space-y-2 max-h-[160px] overflow-y-auto custom-scrollbar pr-2">
-                          {groupedInsurances.map((group: any, idx: number) => (
-                            <div key={idx} className="flex items-center justify-between bg-slate-950 border border-amber-900/50 rounded-lg p-3 group-item transition-colors">
-                              <div className="flex flex-col">
-                                <div className="text-sm font-bold text-amber-500">{formatMoney(Number(group.amount))}</div>
-                                <div className="text-[10px] text-slate-400 flex items-center gap-1">
-                                  {group.displayFreq} <span className="opacity-70">(с {new Date(group.payment_date).toLocaleDateString('ru-RU', {month: 'short', year: 'numeric'})})</span>
+                                </div>
+                                <div className="flex items-center space-x-1">
+                                  <button onClick={() => openEpModal(group)} className="text-slate-500 hover:text-indigo-400 transition-colors p-2 rounded-md" title="Редактировать">
+                                    <Pencil size={16} />
+                                  </button>
+                                  <button onClick={() => handleDeleteExtraPaymentGroup(group)} className="text-slate-500 hover:text-red-400 transition-colors p-2 rounded-md" title="Удалить">
+                                    <Trash2 size={16} />
+                                  </button>
                                 </div>
                               </div>
-                              <div className="flex items-center space-x-1">
-                                <button onClick={() => openInsModal(group)} className="text-slate-500 hover:text-amber-400 transition-colors p-2 rounded-md" title="Редактировать">
-                                  <Pencil size={16} />
-                                </button>
-                                <button onClick={() => handleDeleteInsuranceGroup(group.groupId)} className="text-slate-500 hover:text-red-400 transition-colors p-2 rounded-md" title="Удалить">
-                                  <Trash2 size={16} />
-                                </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* ПРАВИЛА: СТРАХОВКА (МАССОВЫЕ) */}
+                    <div className="bg-amber-950/30 p-5 rounded-2xl border border-amber-500/30 shadow-[0_0_15px_rgba(245,158,11,0.15)] flex flex-col h-full">
+                      <div className="flex justify-between items-center mb-4">
+                        <h3 className="text-lg font-semibold text-amber-500 flex items-center gap-2">
+                          <Shield className="text-amber-500" size={20} /> Планы страховок
+                        </h3>
+                        <button onClick={() => openInsModal(null)} className="bg-amber-600 hover:bg-amber-500 text-white text-xs px-3 py-1.5 rounded-lg transition-colors font-medium shadow-lg shadow-amber-900/20">
+                          + Добавить
+                        </button>
+                      </div>
+                      
+                      <div className="flex-1">
+                        {groupedInsurances.length === 0 ? (
+                          <div className="text-amber-500/50 text-sm text-center py-6 border-2 border-dashed border-amber-900/50 rounded-xl h-full flex items-center justify-center">
+                            Нет правил страхования
+                          </div>
+                        ) : (
+                          <div className="space-y-2 max-h-[160px] overflow-y-auto custom-scrollbar pr-2">
+                            {groupedInsurances.map((group: any, idx: number) => (
+                              <div key={idx} className="flex items-center justify-between bg-slate-950 border border-amber-900/50 rounded-lg p-3 group-item transition-colors">
+                                <div className="flex flex-col">
+                                  <div className="text-sm font-bold text-amber-500">{formatMoney(Number(group.amount))}</div>
+                                  <div className="text-[10px] text-slate-400 flex items-center gap-1">
+                                    {group.displayFreq} <span className="opacity-70">(с {new Date(group.payment_date).toLocaleDateString('ru-RU', {month: 'short', year: 'numeric'})})</span>
+                                  </div>
+                                </div>
+                                <div className="flex items-center space-x-1">
+                                  <button onClick={() => openInsModal(group)} className="text-slate-500 hover:text-amber-400 transition-colors p-2 rounded-md" title="Редактировать">
+                                    <Pencil size={16} />
+                                  </button>
+                                  <button onClick={() => handleDeleteInsuranceGroup(group.groupId)} className="text-slate-500 hover:text-red-400 transition-colors p-2 rounded-md" title="Удалить">
+                                    <Trash2 size={16} />
+                                  </button>
+                                </div>
                               </div>
-                            </div>
-                          ))}
-                        </div>
-                      )}
+                            ))}
+                          </div>
+                        )}
+                      </div>
                     </div>
                   </div>
-                </div>
-
-                <div className="bg-slate-900 p-6 rounded-2xl shadow-lg border border-slate-800 h-80 mt-6">
+                )}
+                
+                {/* ГРАФИК */}
+                <div className="bg-slate-900 p-6 rounded-2xl shadow-lg border border-slate-800 h-80 mb-6">
                   <h3 className="text-lg font-semibold mb-4 text-white">График убывания долга</h3>
                   {chartComponent}
                 </div>
                 
+                {/* ТАБЛИЦА */}
                 {tableComponent}
               </>
             ) : (
